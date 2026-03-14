@@ -1,0 +1,30 @@
+name: Daily Gift Send
+
+on:
+  # 每天北京时间 8:00 执行 (UTC 0:00)
+  schedule:
+    - cron: '0 0 * * *'
+  # 手动触发
+  workflow_dispatch:
+
+jobs:
+  send_gift:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run
+        env:
+          COOKIE: ${{ secrets.COOKIE }}
+          ROOM_ID: ${{ secrets.ROOM_ID || '74751' }}
+        run: python main.py
