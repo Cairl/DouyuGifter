@@ -41,7 +41,12 @@ jobs:
           exit $STATUS
 
       - name: Update COOKIE secret
-        if: ${{ always() && secrets.COOKIE_PAT != '' && steps.run.outputs.cookie != '' }}
+        if: ${{ always() && steps.run.outputs.cookie != '' }}
         env:
           GH_TOKEN: ${{ secrets.COOKIE_PAT }}
-        run: gh secret set COOKIE -b "${{ steps.run.outputs.cookie }}"
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "COOKIE_PAT missing; skip."
+            exit 0
+          fi
+          gh secret set COOKIE -b "${{ steps.run.outputs.cookie }}"
