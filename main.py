@@ -29,14 +29,16 @@ RENEW_URL = "https://passport.douyu.com/lapi/passport/iframe/safeAuth?client_id=
 CSRF_URL = "https://www.douyu.com/curl/csrfApi/getCsrfCookie"
 
 # 日志配置
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "").strip().upper() or "WARNING"
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, LOG_LEVEL, logging.WARNING),
     format='[%(asctime)s] %(levelname)s: %(message)s',
     datefmt='%H:%M:%S'
 )
 
-# 禁用 webdriver-manager 冗余日志
-logging.getLogger('webdriver_manager').setLevel(logging.WARNING)
+# 降低第三方库日志噪音
+for _name in ("webdriver_manager", "WDM", "selenium", "urllib3"):
+    logging.getLogger(_name).setLevel(logging.ERROR)
 log = logging.getLogger(__name__)
 
 COOKIE_ATTR_KEYS = {"path", "domain", "expires", "max-age", "secure", "httponly", "samesite"}
@@ -100,6 +102,10 @@ def set_session_cookie_header(session: requests.Session, cookie_str: str) -> Non
 def should_output_cookie() -> bool:
     val = os.environ.get("OUTPUT_COOKIE", "").strip().lower()
     return val in {"1", "true", "yes", "y"}
+
+
+def status(msg: str) -> None:
+    print(msg, flush=True)
 
 
 def emit_cookie_output(cookie_str: str) -> None:
@@ -333,7 +339,7 @@ def main():
         log.error("环境变量 COOKIE 未设置")
         sys.exit(1)
 
-    log.info(f"目标直播间: {room_id}")
+    status(f"room={room_id}")
 
     session = get_session(cookie)
 
@@ -355,8 +361,7 @@ def main():
         if not cookie_valid:
             log.error(f"验证失败: {msg}")
             sys.exit(1)
-    log.info("Cookie验证通过")
-    log.info("Session 已完成保活刷新")
+    status("cookie=ok")
 
     # 输出最新Cookie给 GitHub Actions（stdout），避免泄露到日志
     cookie = get_cookie_string(session) or cookie
@@ -365,7 +370,8 @@ def main():
     # ===== 步骤2: 触发荧光棒发放 =====
     log.info("=" * 40)
     log.info("[2/4] 触发荧光棒发放")
-    visit_room_with_selenium(cookie, room_id)
+    triggered = visit_room_with_selenium(cookie, room_id)
+    status("trigger=ok" if triggered else "trigger=fail")
 
     # ===== 步骤3: 获取背包 =====
     log.info("=" * 40)
@@ -373,18 +379,17 @@ def main():
     gifts = get_backpack_gifts(session, room_id)
 
     if not gifts:
-        log.warning("背包为空或查询失败")
+        status("gifts=0 sticks=0")
         sys.exit(0)
 
     # 筛选荧光棒
     fluorescent_sticks = [g for g in gifts if g.get("id") == FLUORESCENT_STICK_ID]
 
     if not fluorescent_sticks:
-        log.warning("背包中无荧光棒")
-        log.info("背包物品清单:")
-        for g in gifts:
-            log.info(f"  - {g.get('name')} (ID:{g.get('id')}): {g.get('count')}个")
+        status(f"gifts={len(gifts)} sticks=0")
         sys.exit(0)
+    stick_total = sum(int(s.get("count", 0) or 0) for s in fluorescent_sticks)
+    status(f"gifts={len(gifts)} sticks={stick_total}")
 
     # ===== 步骤4: 赠送荧光棒 =====
     log.info("=" * 40)
@@ -400,7 +405,7 @@ def main():
         time.sleep(0.3)
 
     log.info("=" * 40)
-    log.info(f"任务完成: 共送出 {total_sent} 个荧光棒")
+    status(f"sent={total_sent}")
 
 
 if __name__ == "__main__":
