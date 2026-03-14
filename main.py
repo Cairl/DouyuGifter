@@ -47,7 +47,7 @@ def parse_cookie(cookie_str: str) -> dict:
         item = item.strip()
         if "=" in item:
             key, value = item.split("=", 1)
-            cookies[key.strip()] = unquote(value.strip())
+            cookies[key.strip()] = value.strip()
     return cookies
 
 
