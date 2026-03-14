@@ -39,22 +39,62 @@ logging.basicConfig(
 logging.getLogger('webdriver_manager').setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
+COOKIE_ATTR_KEYS = {"path", "domain", "expires", "max-age", "secure", "httponly", "samesite"}
+
+
+def normalize_cookie_string(cookie_str: str) -> str:
+    if not cookie_str:
+        return ""
+    cookie_str = cookie_str.strip()
+    if (cookie_str.startswith('"') and cookie_str.endswith('"')) or (
+        cookie_str.startswith("'") and cookie_str.endswith("'")
+    ):
+        cookie_str = cookie_str[1:-1]
+    cookie_str = cookie_str.replace("\r", "").replace("\n", "")
+    return cookie_str.strip()
+
 
 def parse_cookie(cookie_str: str) -> dict:
     """将Cookie字符串解析为字典"""
+    cookie_str = normalize_cookie_string(cookie_str)
     cookies = {}
     for item in cookie_str.split(";"):
         item = item.strip()
         if "=" in item:
             key, value = item.split("=", 1)
-            cookies[key.strip()] = value.strip()
+            key = key.strip()
+            if not key:
+                continue
+            if key.lower() in COOKIE_ATTR_KEYS:
+                continue
+            cookies[key] = value.strip()
     return cookies
+
+
+def cookie_dict_to_string(cookie_dict: dict) -> str:
+    return "; ".join([f"{k}={v}" for k, v in cookie_dict.items()])
 
 
 def get_cookie_string(session: requests.Session) -> str:
     """从Session中提取Cookie字符串"""
+    header_cookie = session.headers.get("Cookie", "").strip()
+    if header_cookie:
+        return header_cookie
     cookie_dict = session.cookies.get_dict()
-    return "; ".join([f"{k}={v}" for k, v in cookie_dict.items()])
+    return cookie_dict_to_string(cookie_dict)
+
+
+def merge_cookie_string(cookie_str: str, response_cookies: requests.cookies.RequestsCookieJar) -> str:
+    cookies = parse_cookie(cookie_str)
+    for c in response_cookies:
+        if c.name:
+            cookies[c.name] = c.value
+    return cookie_dict_to_string(cookies)
+
+
+def set_session_cookie_header(session: requests.Session, cookie_str: str) -> None:
+    if cookie_str:
+        session.headers["Cookie"] = cookie_str
 
 
 def should_output_cookie() -> bool:
@@ -95,11 +135,8 @@ def get_session(cookie_str: str) -> requests.Session:
         "Origin": "https://www.douyu.com",
         "Referer": "https://www.douyu.com/",
     })
-
-    cookies = parse_cookie(cookie_str)
-    for key, value in cookies.items():
-        session.cookies.set(key, value, domain=".douyu.com")
-
+    cookie_str = normalize_cookie_string(cookie_str)
+    set_session_cookie_header(session, cookie_str)
     return session
 
 
@@ -171,15 +208,15 @@ def renew_cookies(session: requests.Session) -> tuple[bool, str]:
     """刷新Cookie和CSRF Token"""
     log.info("正在执行Cookie保活刷新...")
     refreshed = False
+    cookie_str = get_cookie_string(session)
 
     # 1. 刷新Cookie
     headers = {
         "Referer": "https://www.douyu.com/directory/myFollow",
         "X-Requested-With": "XMLHttpRequest",
     }
-    cookie_header = get_cookie_string(session)
-    if cookie_header:
-        headers["Cookie"] = cookie_header
+    if cookie_str:
+        headers["Cookie"] = cookie_str
     try:
         resp = session.get(RENEW_URL, headers=headers, timeout=10)
         data = parse_jsonp(resp.text)
@@ -188,15 +225,16 @@ def renew_cookies(session: requests.Session) -> tuple[bool, str]:
         else:
             log.info("Cookie刷新请求成功")
             refreshed = True
+        cookie_str = merge_cookie_string(cookie_str, resp.cookies)
+        set_session_cookie_header(session, cookie_str)
     except Exception as e:
         log.error(f"Cookie刷新请求失败: {e}")
 
     # 2. 刷新CSRF Token
     try:
         csrf_headers = {}
-        cookie_header = get_cookie_string(session)
-        if cookie_header:
-            csrf_headers["Cookie"] = cookie_header
+        if cookie_str:
+            csrf_headers["Cookie"] = cookie_str
         resp = session.get(CSRF_URL, headers=csrf_headers, timeout=10)
         data = resp.json()
         if data.get("error") == 0:
@@ -204,11 +242,12 @@ def renew_cookies(session: requests.Session) -> tuple[bool, str]:
             refreshed = True
         else:
             log.warning(f"CSRF Token刷新失败: {data.get('msg')}")
+        cookie_str = merge_cookie_string(cookie_str, resp.cookies)
+        set_session_cookie_header(session, cookie_str)
     except Exception as e:
         log.error(f"CSRF Token刷新请求失败: {e}")
 
     # 输出更新后的Cookie由调用方决定，这里仅记录摘要
-    cookie_str = get_cookie_string(session)
     log.info(f"Cookie refresh done. Total cookies: {len(session.cookies.get_dict())}")
 
     return refreshed, cookie_str
