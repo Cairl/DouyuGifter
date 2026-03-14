@@ -1,10 +1,10 @@
 name: Daily Gift Send
 
 on:
-  # 每天北京时间 8:00 执行 (UTC 0:00)
+  # Every 6 hours (UTC)
   schedule:
-    - cron: '0 0 * * *'
-  # 手动触发
+    - cron: '0 */6 * * *'
+  # Manual trigger
   workflow_dispatch:
 
 jobs:
@@ -24,7 +24,24 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run
+        id: run
         env:
           COOKIE: ${{ secrets.COOKIE }}
           ROOM_ID: ${{ secrets.ROOM_ID || '74751' }}
-        run: python main.py
+          OUTPUT_COOKIE: '1'
+        run: |
+          set -euo pipefail
+          set +e
+          COOKIE_OUTPUT=$(python main.py | awk -F= '/^cookie=/{print $0}')
+          STATUS=$?
+          set -e
+          if [ -n "$COOKIE_OUTPUT" ]; then
+            echo "$COOKIE_OUTPUT" >> "$GITHUB_OUTPUT"
+          fi
+          exit $STATUS
+
+      - name: Update COOKIE secret
+        if: ${{ always() && secrets.COOKIE_PAT != '' && steps.run.outputs.cookie != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.COOKIE_PAT }}
+        run: gh secret set COOKIE -b "${{ steps.run.outputs.cookie }}"

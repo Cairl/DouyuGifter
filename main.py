@@ -57,12 +57,29 @@ def get_cookie_string(session: requests.Session) -> str:
     return "; ".join([f"{k}={v}" for k, v in cookie_dict.items()])
 
 
+def should_output_cookie() -> bool:
+    val = os.environ.get("OUTPUT_COOKIE", "").strip().lower()
+    return val in {"1", "true", "yes", "y"}
+
+
+def emit_cookie_output(cookie_str: str) -> None:
+    """Emit cookie to stdout for GitHub Actions outputs."""
+    if should_output_cookie() and cookie_str:
+        print(f"cookie={cookie_str}", flush=True)
+
+
 def parse_jsonp(jsonp_str: str) -> dict:
     """解析JSONp字符串"""
     try:
+        if not jsonp_str:
+            return {}
+        jsonp_str = jsonp_str.strip()
         match = re.search(r'^[^(]*\((.*)\)[^)]*$', jsonp_str)
         if match:
             return json.loads(match.group(1))
+        # Fallback: sometimes server returns plain JSON
+        if jsonp_str.startswith("{") and jsonp_str.endswith("}"):
+            return json.loads(jsonp_str)
     except Exception as e:
         log.error(f"JSONp解析失败: {e}")
     return {}
@@ -150,15 +167,19 @@ def validate_cookie(session: requests.Session, room_id: str) -> tuple[bool, str]
         return False, str(e)
 
 
-def renew_cookies(session: requests.Session) -> bool:
+def renew_cookies(session: requests.Session) -> tuple[bool, str]:
     """刷新Cookie和CSRF Token"""
     log.info("正在执行Cookie保活刷新...")
+    refreshed = False
 
     # 1. 刷新Cookie
     headers = {
         "Referer": "https://www.douyu.com/directory/myFollow",
-        "X-Requested-With": "XMLHttpRequest"
+        "X-Requested-With": "XMLHttpRequest",
     }
+    cookie_header = get_cookie_string(session)
+    if cookie_header:
+        headers["Cookie"] = cookie_header
     try:
         resp = session.get(RENEW_URL, headers=headers, timeout=10)
         data = parse_jsonp(resp.text)
@@ -166,26 +187,37 @@ def renew_cookies(session: requests.Session) -> bool:
             log.warning(f"Cookie刷新接口返回异常: {data.get('msg')}")
         else:
             log.info("Cookie刷新请求成功")
+            refreshed = True
     except Exception as e:
         log.error(f"Cookie刷新请求失败: {e}")
 
     # 2. 刷新CSRF Token
     try:
-        resp = session.get(CSRF_URL, timeout=10)
-        if resp.status_code == 200:
+        csrf_headers = {}
+        cookie_header = get_cookie_string(session)
+        if cookie_header:
+            csrf_headers["Cookie"] = cookie_header
+        resp = session.get(CSRF_URL, headers=csrf_headers, timeout=10)
+        data = resp.json()
+        if data.get("error") == 0:
             log.info("CSRF Token刷新成功")
+            refreshed = True
         else:
-            log.warning(f"CSRF Token刷新失败: HTTP {resp.status_code}")
+            log.warning(f"CSRF Token刷新失败: {data.get('msg')}")
     except Exception as e:
         log.error(f"CSRF Token刷新请求失败: {e}")
 
-    return True
+    # 输出更新后的Cookie由调用方决定，这里仅记录摘要
+    cookie_str = get_cookie_string(session)
+    log.info(f"Cookie refresh done. Total cookies: {len(session.cookies.get_dict())}")
+
+    return refreshed, cookie_str
 
 
-def keepalive_session(session: requests.Session) -> bool:
+def keepalive_session(session: requests.Session) -> str:
     """保持Session活跃"""
     # 执行刷新逻辑
-    renew_cookies(session)
+    _, cookie_str = renew_cookies(session)
 
     endpoints = [
         "https://www.douyu.com/member/cp/getFansBadgeList",
@@ -198,7 +230,7 @@ def keepalive_session(session: requests.Session) -> bool:
             log.debug(f"保活请求: {url}")
         except Exception:
             pass
-    return True
+    return cookie_str
 
 
 def get_backpack_gifts(session: requests.Session, room_id: str, retry: int = 3) -> list:
@@ -255,7 +287,7 @@ def send_gift(session: requests.Session, room_id: str, prop_id: int, count: int)
 
 def main():
     """主函数"""
-    cookie = os.environ.get("COOKIE", "")
+    cookie = os.environ.get("COOKIE", "").strip()
     room_id = os.environ.get("ROOM_ID", DEFAULT_ROOM_ID)
 
     if not cookie:
@@ -269,15 +301,27 @@ def main():
     # ===== 步骤1: Cookie验证 =====
     log.info("=" * 40)
     log.info("[1/4] Cookie验证")
+    # Refresh cookies first to extend TTL (best-effort)
+    refreshed_cookie = keepalive_session(session)
+    if refreshed_cookie:
+        cookie = refreshed_cookie
+
     cookie_valid, msg = validate_cookie(session, room_id)
     if not cookie_valid:
-        log.error(f"验证失败: {msg}")
-        sys.exit(1)
+        log.warning(f"验证失败: {msg}，尝试再次刷新 Cookie")
+        refreshed_cookie = keepalive_session(session)
+        if refreshed_cookie:
+            cookie = refreshed_cookie
+        cookie_valid, msg = validate_cookie(session, room_id)
+        if not cookie_valid:
+            log.error(f"验证失败: {msg}")
+            sys.exit(1)
     log.info("Cookie验证通过")
-
-    # 保持Session活跃
-    keepalive_session(session)
     log.info("Session 已完成保活刷新")
+
+    # 输出最新Cookie给 GitHub Actions（stdout），避免泄露到日志
+    cookie = get_cookie_string(session) or cookie
+    emit_cookie_output(cookie)
 
     # ===== 步骤2: 触发荧光棒发放 =====
     log.info("=" * 40)
